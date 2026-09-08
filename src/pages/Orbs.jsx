@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useVision } from '../lib/useVision.js'
 import { loadSettings, addSession } from '../lib/storage.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { createBloom, drawCameraBackdrop, drawVignette } from '../lib/render.js'
 
 // MediaPipe hand skeleton connections (pairs of landmark indices).
 const CONNECTIONS = [
@@ -28,6 +30,7 @@ export default function Orbs() {
   const [result, setResult] = useState({ score: 0, maxCombo: 0 })
 
   // Mutable game state kept in a ref so the animation loop never re-renders React.
+  const bloomRef = useRef(createBloom(0.5))
   const game = useRef({
     orbs: [],
     score: 0,
@@ -77,6 +80,13 @@ export default function Orbs() {
       g.lastTime = now
 
       drawBackground(ctx, W, H, now)
+      if (s.cameraFeed) {
+        drawCameraBackdrop(ctx, videoRef.current, W, H, {
+          mirror: s.mirror, alpha: 0.16,
+          grade: 'grayscale(0.85) brightness(0.45) contrast(1.2)',
+        })
+      }
+      const bctx = s.bloom ? bloomRef.current.layer(W, H) : null
 
       // Detect hands and gather cursor + pinch.
       const res = status === 'ready' ? detect(now) : null
@@ -127,6 +137,7 @@ export default function Orbs() {
               g.combo += 1
               g.maxCombo = Math.max(g.maxCombo, g.combo)
               g.score += 10 + Math.min(g.combo, 20) * 2
+              sfx.combo(g.combo)
             }
           }
           if (orb.y > H + orb.r) {
@@ -146,15 +157,21 @@ export default function Orbs() {
             }
           }
           spawnBlast(g, cursor.x, cursor.y)
+          sfx.release()
         }
         g.wasPinching = pinching
 
         g.orbs = g.orbs.filter((o) => o.alive)
         drawOrbs(ctx, g.orbs, now)
+        if (bctx) drawOrbs(bctx, g.orbs, now)
         drawParticles(ctx, g, dt)
+        if (bctx) bloomRef.current.composite(ctx, W, H, { blur: 11, alpha: 0.55 })
+        drawVignette(ctx, W, H, 0.45)
         drawHud(ctx, W, g)
       } else {
         drawParticles(ctx, g, dt)
+        if (bctx) bloomRef.current.composite(ctx, W, H, { blur: 11, alpha: 0.55 })
+        drawVignette(ctx, W, H, 0.45)
       }
     }
 
@@ -174,12 +191,15 @@ export default function Orbs() {
     g.lastSpawn = 0
     g.wasPinching = false
     g.running = true
+    playMusic('chill')
     setPhase('playing')
   }
 
   function endRound() {
     const g = game.current
     g.running = false
+    stopMusic()
+    sfx.win()
     const r = { score: g.score, maxCombo: g.maxCombo }
     setResult(r)
     addSession({ game: 'orbs', score: r.score, maxCombo: r.maxCombo, duration: ROUND_SECONDS, detail: `best combo x${r.maxCombo}` })

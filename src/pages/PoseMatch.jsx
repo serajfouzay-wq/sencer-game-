@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useVision } from '../lib/useVision.js'
 import { loadSettings, addSession } from '../lib/storage.js'
-import { POSES, POSE_CONNECTIONS, scorePose, boneScore } from '../lib/poses.js'
+import { POSES, scorePose, boneScore } from '../lib/poses.js'
 import { useCanvasSize, logicalSize, scoreColor } from '../lib/canvas.js'
+import { createBloom, drawCameraBackdrop, drawVignette, drawFrameGuide, drawColorGrade } from '../lib/render.js'
+import { drawCharacter, withAlpha } from '../lib/characters.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { Screen, Title, Button, Results, Loading, ErrorScreen, Odometer } from '../components/ui.jsx'
 
 const ROUND_POSES = 6
 const SECONDS_PER_POSE = 10
@@ -35,6 +39,7 @@ export default function PoseMatch() {
 
   const g = useRef({
     phase: 'menu',
+    bloom: createBloom(0.5),
     order: [],
     index: 0,
     score: 0,
@@ -66,6 +71,7 @@ export default function PoseMatch() {
       celebrate: 0,
       logged: false,
     })
+    playMusic('chill')
     setUi((u) => ({ ...u, phase: 'playing', results: [] }))
   }
 
@@ -105,8 +111,21 @@ export default function PoseMatch() {
       if (g.phase === 'playing') advance(dt)
 
       drawBackdrop(ctx, W, H, now)
-      if (target) drawTarget(ctx, W, H, target, now)
-      if (person) drawPlayer(ctx, W, H, person)
+      if (settings.cameraFeed) {
+        drawCameraBackdrop(ctx, videoRef.current, W, H, {
+          mirror: settings.mirror,
+          alpha: 0.30,
+          grade: 'grayscale(0.75) brightness(0.5) contrast(1.15)',
+        })
+        drawColorGrade(ctx, W, H, '#7C5CFF', 0.10)
+      }
+      const bctx = settings.bloom ? g.bloom.layer(W, H) : null
+      const mainGlow = bctx ? 0 : null
+      if (target) { drawTarget(ctx, W, H, target, now, mainGlow ?? 26); if (bctx) drawTarget(bctx, W, H, target, now, 0) }
+      if (person) { drawPlayer(ctx, W, H, person, mainGlow ?? 16); if (bctx) drawPlayer(bctx, W, H, person, 0) }
+      if (bctx) g.bloom.composite(ctx, W, H, { blur: 10, alpha: 0.55 })
+      drawVignette(ctx, W, H, 0.5)
+      drawFrameGuide(ctx, W, H, !!person && g.visible, Math.sin(now * 0.006) * 0.5 + 0.5)
       if (g.phase === 'playing') drawHud(ctx, W, H, dt)
       syncUi(target)
     }
@@ -123,6 +142,7 @@ export default function PoseMatch() {
     }
 
     function finishPose(locked) {
+      if (locked) sfx.perfect(); else sfx.miss()
       const timeBonus = locked ? Math.round(Math.max(0, g.timeLeft) * 12) : 0
       const quality = Math.round(g.match * 100)
       const gained = locked ? 100 + timeBonus : Math.round(quality * 0.5)
@@ -139,6 +159,8 @@ export default function PoseMatch() {
       g.timeLeft = SECONDS_PER_POSE
       if (g.index >= g.order.length) {
         g.phase = 'over'
+        stopMusic()
+        sfx.win()
         if (!g.logged) {
           g.logged = true
           const hits = g.results.filter((r) => r.locked).length
@@ -201,71 +223,69 @@ export default function PoseMatch() {
       return { x: W * 0.5 - w / 2, y: H * 0.14, w, h }
     }
 
-    function drawTarget(ctx, W, H, target, now) {
+    function drawTarget(ctx, W, H, target, now, glow = 26) {
       const box = targetBox(W, H)
-      const pt = (i) => {
-        const p = target.points[i]
+      const pts = {}
+      for (const k of Object.keys(target.points)) {
+        const p = target.points[k]
         const x = settings.mirror ? 1 - p.x : p.x
-        return { x: box.x + x * box.w, y: box.y + p.y * box.h }
+        pts[k] = { x: box.x + x * box.w, y: box.y + p.y * box.h }
       }
-      const pulse = 0.55 + Math.sin(now * 0.003) * 0.12
-
       ctx.save()
-      ctx.globalAlpha = pulse
-      ctx.strokeStyle = '#7C5CFF'
-      ctx.lineWidth = 16
-      ctx.lineCap = 'round'
-      ctx.lineJoin = 'round'
-      ctx.shadowColor = '#7C5CFF'
-      ctx.shadowBlur = 30
-      for (const [a, b] of POSE_CONNECTIONS) {
-        const u = pt(a), v = pt(b)
-        ctx.beginPath()
-        ctx.moveTo(u.x, u.y)
-        ctx.lineTo(v.x, v.y)
-        ctx.stroke()
-      }
-      const head = pt(0)
-      const shoulderGap = Math.hypot(pt(11).x - pt(12).x, pt(11).y - pt(12).y)
+      const cone = ctx.createLinearGradient(W / 2, 0, W / 2, box.y + box.h)
+      cone.addColorStop(0, 'rgba(124,92,255,0.14)')
+      cone.addColorStop(1, 'rgba(124,92,255,0)')
+      ctx.fillStyle = cone
       ctx.beginPath()
-      ctx.arc(head.x, head.y, Math.max(14, shoulderGap * 0.42), 0, Math.PI * 2)
+      ctx.moveTo(W / 2 - 26, 0)
+      ctx.lineTo(W / 2 - box.w * 0.42, box.y + box.h)
+      ctx.lineTo(W / 2 + box.w * 0.42, box.y + box.h)
+      ctx.lineTo(W / 2 + 26, 0)
+      ctx.closePath()
+      ctx.fill()
+      ctx.strokeStyle = withAlpha('#7C5CFF', 0.4)
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.ellipse(W / 2, box.y + box.h + 6, box.w * 0.30, box.w * 0.055, 0, 0, Math.PI * 2)
       ctx.stroke()
       ctx.restore()
+
+      drawCharacter(ctx, pts, {
+        color: '#7C5CFF',
+        accent: '#DED3FF',
+        alpha: 0.55 + Math.sin(now * 0.003) * 0.12,
+        hologram: true,
+        glow,
+      })
     }
 
-    function drawPlayer(ctx, W, H, lm) {
-      const pt = (i) => ({
-        x: (settings.mirror ? 1 - lm[i].x : lm[i].x) * W,
-        y: lm[i].y * H,
-      })
-      ctx.save()
-      ctx.lineCap = 'round'
-      ctx.lineJoin = 'round'
-      ctx.lineWidth = 7
-      for (const [a, b] of POSE_CONNECTIONS) {
-        const va = lm[a], vb = lm[b]
-        if (!va || !vb || (va.visibility ?? 1) < 0.4 || (vb.visibility ?? 1) < 0.4) continue
-        const s = boneScore(g.bones, a, b)
-        const col = s == null ? '#8A8AA0' : scoreColor(s)
-        const u = pt(a), v = pt(b)
-        ctx.strokeStyle = col
-        ctx.shadowColor = col
-        ctx.shadowBlur = 12
-        ctx.beginPath()
-        ctx.moveTo(u.x, u.y)
-        ctx.lineTo(v.x, v.y)
-        ctx.stroke()
-      }
-      ctx.shadowBlur = 0
-      ctx.fillStyle = '#FFFFFF'
+    function drawPlayer(ctx, W, H, lm, glow = 16) {
+      const pts = {}
       for (const i of [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]) {
         if (!lm[i] || (lm[i].visibility ?? 1) < 0.4) continue
-        const q = pt(i)
-        ctx.beginPath()
-        ctx.arc(q.x, q.y, 4, 0, Math.PI * 2)
-        ctx.fill()
+        pts[i] = { x: (settings.mirror ? 1 - lm[i].x : lm[i].x) * W, y: lm[i].y * H }
       }
-      ctx.restore()
+      const feet = [pts[27], pts[28]].filter(Boolean)
+      if (feet.length) {
+        const fx = feet.reduce((a, p) => a + p.x, 0) / feet.length
+        const fy = Math.max(...feet.map((p) => p.y))
+        ctx.save()
+        ctx.globalAlpha = 0.3
+        ctx.fillStyle = '#000'
+        ctx.beginPath()
+        ctx.ellipse(fx, fy + 8, 48, 11, 0, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.restore()
+      }
+      drawCharacter(ctx, pts, {
+        color: '#00E5B0',
+        accent: '#FFFFFF',
+        glow,
+        limbColor: (a, b) => {
+          const sc = boneScore(g.bones, a, b)
+          return sc == null ? null : scoreColor(sc)
+        },
+      })
     }
 
     function drawHud(ctx, W, H, dt) {
@@ -363,6 +383,7 @@ export default function PoseMatch() {
   }, [status])
 
   const loading = status === 'loading-model' || status === 'starting-camera'
+  const ACCENT = '#7C5CFF'
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] w-full overflow-hidden">
@@ -371,17 +392,19 @@ export default function PoseMatch() {
 
       {ui.phase === 'playing' && (
         <>
-          <div className="pointer-events-none absolute left-6 top-6">
-            <div className="text-xs text-white/50">
+          <div className="pointer-events-none absolute left-6 top-6 animate-riseIn" key={ui.poseName}>
+            <div className="text-[11px] uppercase tracking-[0.2em] text-white/45">
               Pose {Math.min(ui.index + 1, ROUND_POSES)} of {ROUND_POSES}
             </div>
-            <div className="font-display text-3xl font-700">{ui.poseName}</div>
-            <div className="text-white/65 text-sm mt-1 max-w-[16rem]">{ui.hint}</div>
-            <div className="mt-4 font-display text-2xl text-mint">{ui.score}</div>
+            <div className="font-display text-3xl md:text-4xl font-700 mt-0.5">{ui.poseName}</div>
+            <div className="text-white/60 text-sm mt-1 max-w-[16rem]">{ui.hint}</div>
+            <div className="mt-4 font-display text-2xl text-mint">
+              <Odometer value={ui.score} />
+            </div>
           </div>
           {!ui.visible && (
             <div className="pointer-events-none absolute inset-x-0 bottom-16 text-center">
-              <span className="rounded-full bg-ember/20 px-4 py-2 text-ember text-sm">
+              <span className="rounded-full bg-ember/20 border border-ember/40 px-4 py-2 text-ember text-sm animate-pulseSoft">
                 Step back so your whole body is in frame
               </span>
             </div>
@@ -389,62 +412,37 @@ export default function PoseMatch() {
         </>
       )}
 
-      {status === 'error' && (
-        <Overlay>
-          <h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p>
-        </Overlay>
-      )}
-
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay>
-          <div className="calibrate mb-5" />
-          <p className="text-muted">
-            {status === 'loading-model' ? 'Loading body model…' : 'Waking up the camera…'}
-          </p>
-        </Overlay>
+        <Loading accent={ACCENT} label={status === 'loading-model' ? 'Loading body model…' : 'Waking up the camera…'} />
       )}
 
       {status === 'ready' && ui.phase === 'menu' && (
-        <Overlay>
-          <p className="text-violet tracking-wide mb-2">Match the shape. Hold it. Bank it.</p>
-          <h1 className="font-display text-4xl md:text-6xl font-700 mb-4 text-center">Copy That</h1>
-          <p className="text-white/70 mb-7 max-w-md text-center">
+        <Screen accent={ACCENT}>
+          <Title kicker="Match the shape · hold it · bank it" accent={ACCENT}>Copy That</Title>
+          <p className="text-white/70 mb-8 max-w-md text-center animate-riseIn" style={{ animationDelay: '90ms', animationFillMode: 'backwards' }}>
             A glowing figure strikes a pose. Copy it with your own body — your limbs turn green as
             they line up. Hold the shape for half a second to bank the points before the timer runs
             out. {ROUND_POSES} poses per round.
           </p>
-          <button onClick={start} className="btn-primary">Start round</button>
+          <Button accent={ACCENT} onClick={start}>Start round</Button>
           <p className="text-muted text-xs mt-5">Stand back about 2 metres so your legs are in frame.</p>
-        </Overlay>
+        </Screen>
       )}
 
       {ui.phase === 'over' && (
-        <Overlay>
-          <p className="text-muted mb-1">Round complete</p>
-          <div className="font-display text-6xl font-700 text-mint mb-5">{ui.score}</div>
-          <ul className="w-full max-w-sm space-y-1.5 mb-7">
-            {ui.results.map((r, i) => (
-              <li key={i} className="flex items-center justify-between rounded-lg bg-white/5 px-4 py-2 text-sm">
-                <span className={r.locked ? 'text-fg' : 'text-muted'}>{r.name}</span>
-                <span className="flex items-center gap-3">
-                  <span style={{ color: scoreColor(r.quality / 100) }}>{r.quality}%</span>
-                  <span className="text-muted w-10 text-right">+{r.points}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-          <button onClick={start} className="btn-primary">Play again</button>
-        </Overlay>
+        <Screen accent={ACCENT}>
+          <p className="text-muted mb-2 tracking-[0.2em] uppercase text-xs">Round complete</p>
+          <div className="font-display text-6xl font-700 text-mint mb-7 animate-pop">
+            <Odometer value={ui.score} />
+          </div>
+          <Results
+            accent={ACCENT}
+            rows={ui.results.map((r) => ({ name: r.name, color: scoreColor(r.quality / 100), value: r.points, note: r.quality + '%' }))}
+          />
+          <Button accent={ACCENT} onClick={start} className="mt-8">Play again</Button>
+        </Screen>
       )}
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }

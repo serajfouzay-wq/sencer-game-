@@ -3,6 +3,10 @@ import { useVision } from '../lib/useVision.js'
 import { loadSettings, addSession } from '../lib/storage.js'
 import { assignPlayers, HAND_CONNECTIONS, BELT_Y } from '../lib/gestures.js'
 import { useCanvasSize, logicalSize, drawRevolver, drawMuzzleFlash } from '../lib/canvas.js'
+import { drawVignette } from '../lib/render.js'
+import { drawGunslinger } from '../lib/characters.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { Screen, Title, Button, HowTo, Loading, ErrorScreen } from '../components/ui.jsx'
 
 const WINS_NEEDED = 3
 const P_COLORS = ['#FFB000', '#00D4FF']
@@ -72,6 +76,7 @@ export default function Quickdraw() {
     g.reaction = null
     g.falseStart = false
     g.logged = false
+    playMusic('western')
     setPhase('holster', { holsterSince: 0 })
   }
 
@@ -126,6 +131,7 @@ export default function Quickdraw() {
           g.holsterSince = now
         } else if (now - g.holsterSince > 900) {
           // Random tension window so nobody can time the draw.
+          sfx.holster()
           setPhase('steady', {
             steadyUntil: now + 1400 + Math.random() * 2600,
             cpuReaction: 260 + Math.random() * 340,
@@ -140,6 +146,7 @@ export default function Quickdraw() {
           const p = players[i]
           if (p && !p.cpu && p.raised) {
             g.flash[i] = 0
+            sfx.ricochet()
             awardRound(1 - i, null, true)
             return
           }
@@ -148,7 +155,7 @@ export default function Quickdraw() {
           setPhase('holster', { holsterSince: 0 })
           return
         }
-        if (now >= g.steadyUntil) setPhase('draw', { drawAt: now })
+        if (now >= g.steadyUntil) { sfx.go(); setPhase('draw', { drawAt: now }) }
         return
       }
 
@@ -158,6 +165,7 @@ export default function Quickdraw() {
           if (p && p.firing) {
             g.flash[i] = 1
             g.shake = 1
+            sfx.shot()
             awardRound(i, Math.round(now - g.drawAt), false)
             return
           }
@@ -168,6 +176,8 @@ export default function Quickdraw() {
       if (g.phase === 'round' && now >= g.roundEndsAt) {
         if (g.wins[0] >= WINS_NEEDED || g.wins[1] >= WINS_NEEDED) {
           setPhase('match')
+          stopMusic()
+          sfx.win()
           if (!g.logged) {
             g.logged = true
             const champ = g.wins[0] > g.wins[1] ? 0 : 1
@@ -232,6 +242,7 @@ export default function Quickdraw() {
         drawPlayer(ctx, W, H, now, dt, players[i], i)
       }
 
+      drawVignette(ctx, W, H, 0.5)
       drawScoreboard(ctx, W)
       ctx.restore()
 
@@ -296,11 +307,24 @@ export default function Quickdraw() {
 
       if (g.flash[i] > 0) g.flash[i] = Math.max(0, g.flash[i] - dt * 2.6)
 
-      // Revolver, lifting as the player draws
+      // Gunslinger, whose arm swings up as the player draws
       const target = p && p.gun ? 1 : 0
       g.lift[i] += (target - g.lift[i]) * Math.min(1, dt * 12)
       const facing = i === 0 ? 1 : -1
-      drawRevolver(ctx, cx, H - 92, 1.5, g.lift[i], facing, !!(p && p.cocked))
+      const scale = Math.min(1.5, H / 460)
+      const beaten = g.phase === 'round' && g.winner != null && g.winner !== i
+      const hand = drawGunslinger(ctx, cx, H - 54, scale, {
+        color: color,
+        raise: g.lift[i],
+        facing,
+        cocked: !!(p && p.cocked),
+        defeated: beaten,
+        t: now,
+      })
+      drawRevolver(ctx, hand.x, hand.y, scale * 0.8, g.lift[i], facing, !!(p && p.cocked))
+      if (g.flash[i] > 0 && !(p && p.lm)) {
+        drawMuzzleFlash(ctx, hand.x + facing * 26 * scale, hand.y, { x: facing, y: -0.1 }, g.flash[i], scale)
+      }
 
       // Nameplate
       ctx.save()
@@ -457,88 +481,65 @@ export default function Quickdraw() {
   }, [status])
 
   const loading = status === 'loading-model' || status === 'starting-camera'
+  const ACCENT = '#FFB000'
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] w-full overflow-hidden">
       <video ref={videoRef} className="hidden" playsInline muted />
       <canvas ref={canvasRef} className="block h-full w-full" />
 
-      {/* Live call-outs sit above the canvas so text stays crisp */}
       {ui.phase !== 'menu' && !loading && status === 'ready' && (
-        <div className="pointer-events-none absolute inset-x-0 top-[22%] flex flex-col items-center px-6 text-center">
+        <div className="pointer-events-none absolute inset-x-0 top-[20%] flex flex-col items-center px-6 text-center">
           <div
+            key={ui.message}
             className={
-              'font-display font-700 tracking-tight drop-shadow-[0_4px_24px_rgba(0,0,0,0.6)] ' +
+              'font-display font-700 tracking-tight drop-shadow-[0_4px_28px_rgba(0,0,0,0.75)] animate-pop ' +
               (ui.phase === 'draw'
-                ? 'text-7xl md:text-8xl text-white animate-[pop_180ms_ease-out]'
+                ? 'text-7xl md:text-9xl text-white'
                 : 'text-3xl md:text-4xl text-white/90')
             }
+            style={ui.phase === 'draw' ? { textShadow: '0 0 50px rgba(255,176,0,0.75)' } : undefined}
           >
             {ui.message}
           </div>
-          {ui.sub && <p className="mt-3 text-white/70 max-w-md">{ui.sub}</p>}
+          {ui.sub && <p className="mt-3 text-white/70 max-w-md animate-fadeIn">{ui.sub}</p>}
           {ui.phase === 'round' && ui.reaction != null && (
-            <div className="mt-4 font-display text-5xl text-white">{ui.reaction}<span className="text-2xl text-white/60">ms</span></div>
+            <div className="mt-4 font-display text-6xl text-white animate-pop">
+              {ui.reaction}<span className="text-2xl text-white/60">ms</span>
+            </div>
           )}
         </div>
       )}
 
       {ui.phase === 'match' && (
-        <div className="absolute inset-x-0 bottom-24 flex justify-center gap-3">
-          <button onClick={() => start(vsCpuRef.current)} className="btn-primary pointer-events-auto">
-            Rematch
-          </button>
-          <button
-            onClick={toMenu}
-            className="btn-ghost pointer-events-auto"
-          >
-            Change mode
-          </button>
+        <div className="absolute inset-x-0 bottom-20 flex justify-center gap-3">
+          <Button accent={ACCENT} onClick={() => start(vsCpuRef.current)} className="pointer-events-auto">Rematch</Button>
+          <Button variant="ghost" onClick={toMenu} className="pointer-events-auto">Change mode</Button>
         </div>
       )}
 
-      {status === 'error' && (
-        <Overlay>
-          <h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p>
-        </Overlay>
-      )}
-
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay>
-          <div className="calibrate mb-5" />
-          <p className="text-muted">
-            {status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'}
-          </p>
-        </Overlay>
+        <Loading accent={ACCENT} label={status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'} />
       )}
 
       {status === 'ready' && ui.phase === 'menu' && (
-        <Overlay>
-          <p className="text-p1 tracking-wide mb-2">Sundown. Two hands. One winner.</p>
-          <h1 className="font-display text-4xl md:text-6xl font-700 mb-4 text-center">
+        <Screen accent={ACCENT}>
+          <Title kicker="Sundown · two hands · one winner" accent={ACCENT}>
             The Fastest in the Hood
-          </h1>
-          <ol className="text-white/75 text-sm space-y-2 mb-7 max-w-sm">
-            <li><span className="text-p1 font-medium">1.</span> Stand one on each side of the camera.</li>
-            <li><span className="text-p1 font-medium">2.</span> Drop your hand below the belt line and hold it.</li>
-            <li><span className="text-p1 font-medium">3.</span> On <span className="text-white font-medium">DRAW!</span> snap your hand into a finger gun and raise it.</li>
-            <li><span className="text-p1 font-medium">4.</span> Move early and you hand the round to your rival.</li>
-          </ol>
-          <div className="flex gap-3">
-            <button onClick={() => start(false)} className="btn-primary">Two players</button>
-            <button onClick={() => start(true)} className="btn-ghost">Duel the machine</button>
+          </Title>
+          <div className="grid gap-2.5 mb-8 max-w-md w-full mt-2">
+            <HowTo glyph="wave" title="Take your side" body="One duellist on the left of the frame, one on the right." delay={80} />
+            <HowTo glyph="fist" title="Hands at your belt" body="Drop your hand below the dotted line and hold it there." delay={160} />
+            <HowTo glyph="gun" title="On DRAW!" body="Snap into a finger gun and raise it. Fastest hand takes the round." delay={240} />
+            <HowTo glyph="point" title="Don't twitch" body="Move before the call and you hand the round to your rival." delay={320} />
           </div>
-        </Overlay>
+          <div className="flex gap-3">
+            <Button accent={ACCENT} onClick={() => start(false)}>Two players</Button>
+            <Button variant="ghost" onClick={() => start(true)}>Duel the machine</Button>
+          </div>
+        </Screen>
       )}
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }

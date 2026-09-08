@@ -5,6 +5,9 @@ machine, and there is no backend to run.
 
 | Game | Players | Tracks |
 |---|---|---|
+| Shadow Dojo | Solo | Hands |
+| The Rift | Solo | Full body |
+| Arcane | Solo | Hands |
 | Kinetic | Up to 4 hands | Hands |
 | Rocket Rush | 1v1, up to 4, or 2v2 teams | Hands |
 | Dance Floor | Solo, 1v1, up to 4 | Full body |
@@ -90,6 +93,48 @@ Every future `git push` redeploys the site on its own.
 ---
 
 ## Part 4 — How to play
+
+### Shadow Dojo
+
+You are the camera. Fighters walk out of the dark toward you.
+
+- **Punch toward the lens.** A fist thrown at the camera lands on whatever is in
+  front of it. There is no depth sensor — the game reads how fast your hand
+  grows on screen, which is why a committed jab registers and a hand waved
+  sideways does not.
+- **Both palms up to guard.** Blocks most of the damage, but you cannot punch
+  while guarding.
+- **Step sideways to dodge.** Move out of a fighter's line and the strike misses
+  entirely. The whole room shifts with you.
+
+A red ring means someone is about to swing. Brutes take more than one clean hit.
+Waves keep coming until your health runs out.
+
+### The Rift
+
+Your whole body flies the ship down a tunnel.
+
+- **Lean left or right to steer.** Line up with the hole in each wall.
+- **Crouch to duck** under the amber bars — they span the full width, so leaning
+  will not save you.
+- **Move your head to look around.** The view is tied to your head position, so
+  leaning in genuinely lets you peer further down the tunnel.
+
+Three shields, and it only gets faster. Green shards are worth chasing.
+
+### Arcane
+
+Draw shapes in the air and they become spells.
+
+- **Point your index finger** to draw. Your fingertip leaves a trail.
+- **Lower or open your hand** to release the stroke and cast it.
+- **A straight line is a Bolt** — hits the nearest wraith hard, in any direction.
+- **A circle is a Ward** — absorbs the next strike aimed at you.
+- **A zigzag is a Chain** — arcs through up to three wraiths at once.
+
+The name of whatever you cast flashes on screen, so a misread is never a
+mystery. If it says *fizzled*, the stroke was too small or too ambiguous — draw
+bigger.
 
 ### Kinetic
 
@@ -179,6 +224,44 @@ everything nearby. Sixty seconds.
 
 ---
 
+## Part 4b — Sound
+
+Every sound in HandPlay is **generated in code** — there are no audio files to
+download, nothing to license, and nothing to break on a venue's wifi. Each game
+has its own music: a slow minor theme for the duel, driving arpeggios in space
+for Rocket Rush and Kinetic, a 124bpm floor track for Dance, and something calm
+under Air Canvas and Orb Catcher.
+
+The **speaker icon in the top right** mutes everything.
+
+> Browsers block audio until someone interacts with the page. The first click
+> anywhere switches it on, so the sound arrives from the first menu button. If a
+> screen is silent, click once and it will come in.
+
+For an event: run the display's volume around 60-70%. The duel's gunshot is the
+loudest thing in the app and it is the sound that pulls a crowd over.
+
+## Part 4c — Tracking quality
+
+Raw camera tracking shimmers by a pixel or two every frame even when a hand is
+perfectly still, and that shimmer is what makes this kind of thing look cheap.
+Every landmark now goes through an adaptive filter that smooths hard when you
+are still and barely at all when you move fast, so the noise disappears without
+adding the lag a simple average would.
+
+Measured on the real numbers: **noise on a still hand is cut by about 11x, while
+a full-width swipe still tracks within 5% of your true position.** The filter
+also runs on every display frame rather than every camera frame, so motion is
+interpolated up to 60fps even though most webcams deliver 30.
+
+Two more things happen before a detection reaches a game:
+
+- **Impossible detections are thrown away** — a hand collapsed to a few pixels,
+  or landmarks off in the distance, are noise, and acting on them creates
+  phantom inputs.
+- **Each person keeps their own identity** between frames, so two players never
+  swap smoothing histories and snap.
+
 ## Part 5 — The dashboard
 
 At `/admin`. Built for someone non-technical to operate.
@@ -186,9 +269,23 @@ At `/admin`. Built for someone non-technical to operate.
 **Stats** — rounds played, high score, average, and the fastest draw ever
 recorded. Filter by game using the buttons at the top.
 
-**Camera & tracking**
+The dashboard has three tabs:
+
+- **Overview** — scores, filterable by game.
+- **Camera setup** — everything below.
+- **Live check** — a camera preview with tracking drawn on it and a plain
+  verdict: whether it looks good, whether hands are too far away, or whether the
+  frame rate is too low. **Run this on site before doors open.** It answers "will
+  this work here" in about five seconds.
+
+**Camera setup**
 - *Mirror the camera* — on by default, so moving right moves right on screen.
 - *Show the tracked skeleton* — turn off for a cleaner look on a big display.
+- *Show the camera behind the game* — on by default. Players see themselves
+  behind the artwork, which is how they know they are in shot. Turn it off only
+  if the room behind them is distracting.
+- *Glow effects* — the bloom pass. Turn it off to gain frame rate on an older
+  machine.
 - *Hands to track in Orb Catcher* — one or two. The duel always uses two.
 - *Detection sensitivity* — **lower it in a dim room** so hands are found more
   easily; **raise it in a busy room** so background people are ignored. This is
@@ -207,7 +304,9 @@ scores.
   frame for the duel, or a whole body for Copy That.
 - **Do a sensitivity pass on site.** Open the dashboard, play a round, and nudge
   the slider until tracking feels locked in.
-- **Press F11** for fullscreen on the display.
+- **Use the fullscreen button** in the top right of the app (or press F11).
+- **Corner brackets turn pink** when nobody is detected — that is the fastest
+  way for a player to realise they have stepped out of shot.
 - **Load each game once before doors open.** The tracking models download from a
   CDN on first use and are cached afterwards.
 - The venue needs internet **once** to fetch the models. After that the games run
@@ -228,8 +327,29 @@ on plain `http://`.
 The browser picks a default. In Chrome: padlock → Site settings → Camera →
 choose the OBSBOT, then reload.
 
+**A punch is not registering in Shadow Dojo.**
+Throw it *at the camera*, not across your body — the game reads forward motion.
+Commit to it; a slow reach will not trigger. You also cannot punch while
+guarding, so drop one hand first.
+
+**My spell keeps fizzling in Arcane.**
+Draw bigger — a small stroke is rejected on purpose so stray finger movement
+does not cast. Keep lines straight and close circles properly.
+
+**Leaning does nothing in The Rift.**
+Your whole body needs to be in frame. Watch the corner brackets: pink means you
+are not being seen at all.
+
 **Tracking is jumpy.**
-Add light in front of the players, then lower the sensitivity slider a little.
+Add light in front of the players first — backlight is almost always the cause.
+Then lower the sensitivity slider a little. If you want it steadier still, raise
+`minCutoff` or lower `beta` in `src/lib/filter.js`; be aware that trading too far
+in that direction makes fast movements feel laggy, which players notice more
+than jitter.
+
+**The frame rate drops with four players.**
+Turn off *Glow effects* in the dashboard, then *Show the camera behind the game*.
+Those two are the most expensive things on screen.
 
 **Players swapped rockets mid-game.**
 They shouldn't — each hand is given a stable id that survives crossing over and
@@ -247,6 +367,14 @@ the picture, player 2 on the right. Move the camera back.
 **Copy That won't register my legs.**
 Step further back. The message at the bottom tells you when your body is only
 partly visible.
+
+**There is no sound.**
+Click anywhere once — browsers block audio until the page is interacted with.
+Then check the speaker icon in the top right, and the machine's own volume.
+
+**The characters look like plain skeletons.**
+Turn *Show the tracked skeleton* off in the dashboard if you want the character
+without the tracking overlay on top of it.
 
 **It runs slowly on an old laptop.**
 Close other tabs. The body model is the heaviest — the two hand games are much
@@ -266,9 +394,21 @@ src/
     poses.js            the pose library, dance routines, matching maths
     tracking.js         keeps a stable id on each hand and person
     canvas.js           canvas sizing, the revolver, muzzle flash
+    scene3d.js          perspective camera, corridors, depth sorting
+    combat.js           punch/guard/dodge reads and NPC behaviour
+    shapes.js           air-drawn shape recognition
+    characters.js       character rig, the gunslinger, the ships
+    audio.js            the synth: every sound effect and music track
+    filter.js           jitter smoothing and detection sanity checks
+    render.js           bloom, camera backdrop, vignette, frame guide
     storage.js          settings and scores saved in the browser
+  components/
+    ui.jsx              menus, buttons, results boards, gesture glyphs
   pages/
     Home.jsx            game picker
+    Dojo.jsx            Shadow Dojo
+    Rift.jsx            The Rift
+    Arcane.jsx          Arcane
     Kinetic.jsx         Kinetic
     Rocket.jsx          Rocket Rush
     Dance.jsx           Dance Floor
@@ -300,6 +440,17 @@ node test/logic.test.mjs
 | Grab / push reach | `src/pages/Kinetic.jsx` | `GRAB_RADIUS`, `FIELD_RADIUS` |
 | Dance beat speed | `src/lib/poses.js` | `beatMs` in `ROUTINE_DATA` |
 | Dance grade cutoffs | `src/pages/Dance.jsx` | `GRADES` |
+| Music tempo and key | `src/lib/audio.js` | `MOODS` |
+| Overall volume | `src/lib/audio.js` | `master.gain.value` |
+| Music vs effects balance | `src/lib/audio.js` | `musicGain`, `sfxGain` |
+| Character colours and build | `src/lib/characters.js` | `drawCharacter` |
+| How far the view swings with your head | `src/lib/scene3d.js` | `parallax` |
+| Punch sensitivity | `src/lib/combat.js` | `growthThreshold` |
+| Enemy health, speed and reach | `src/lib/combat.js` | `NPC_KINDS` |
+| Spell recognition tolerance | `src/lib/shapes.js` | `recognizeShape` |
+| Smoothing vs responsiveness | `src/lib/filter.js` | `minCutoff`, `beta` |
+| Bloom strength | `src/lib/render.js` | `composite()` blur and alpha |
+| Camera backdrop brightness | each game page | `drawCameraBackdrop` alpha |
 
 ### Adding your own pose
 

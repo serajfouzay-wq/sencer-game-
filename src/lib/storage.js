@@ -8,6 +8,8 @@ export const defaultSettings = {
   mirror: true,       // mirror the camera like a selfie
   showSkeleton: true, // draw the hand skeleton
   sensitivity: 0.6,   // min detection confidence (0.3 - 0.9)
+  cameraFeed: true,   // show the player behind the game, Kinect style
+  bloom: true,        // additive glow pass
 }
 
 export function loadSettings() {

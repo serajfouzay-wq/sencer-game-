@@ -4,6 +4,9 @@ import { loadSettings, addSession } from '../lib/storage.js'
 import { HAND_CONNECTIONS, palmCenter, openness, isFist } from '../lib/gestures.js'
 import { createTracker } from '../lib/tracking.js'
 import { useCanvasSize, logicalSize } from '../lib/canvas.js'
+import { createBloom, drawCameraBackdrop, drawVignette } from '../lib/render.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { Screen, Title, Button, HowTo, Loading, ErrorScreen, Odometer } from '../components/ui.jsx'
 
 const ROUND_SECONDS = 75
 const ORB_COLORS = ['#00E5B0', '#7C5CFF', '#00D4FF', '#FF4D8D', '#FFB000']
@@ -25,6 +28,7 @@ export default function Kinetic() {
   const g = useRef({
     phase: 'menu',
     tracker: createTracker({ maxDist: 0.26, maxAge: 400 }),
+    bloom: createBloom(0.5),
     orbs: [],
     dust: [],
     shocks: [],
@@ -48,6 +52,7 @@ export default function Kinetic() {
     g.timeLeft = ROUND_SECONDS
     g.logged = false
     g.phase = 'playing'
+    playMusic('space')
   }
 
   useEffect(() => {
@@ -100,6 +105,8 @@ export default function Kinetic() {
           if (!g.logged) {
             g.logged = true
             addSession({ game: 'kinetic', score: g.score, detail: `${g.banked} orbs banked` })
+            stopMusic()
+            sfx.win()
           }
         }
         spawnOrbs(W, H)
@@ -149,6 +156,7 @@ export default function Kinetic() {
               best.held = h.id
               g.grips.set(h.id, best)
               g.shocks.push({ x: h.x, y: h.y, r: 10, max: 70, life: 1, color: '#FFFFFF' })
+              sfx.grab()
             }
           } else {
             // Carry it, and remember the hand's motion for the throw.
@@ -165,6 +173,7 @@ export default function Kinetic() {
             gripped.vy = h.vy * 1.15
             g.grips.delete(h.id)
             g.shocks.push({ x: h.x, y: h.y, r: 12, max: 110, life: 1, color: '#00E5B0' })
+            sfx.release()
           }
           // An open palm pushes everything nearby away.
           const power = h.open
@@ -220,6 +229,7 @@ export default function Kinetic() {
           const pts = 100 + Math.min(200, Math.round(speed / 6))
           g.score += pts
           g.banked += 1
+          sfx.bank(g.banked)
           g.bursts.push({ x: o.x, y: o.y, color: o.color, life: 1, pts })
           g.shocks.push({ x: goal.x, y: goal.y, r: goal.r * 0.5, max: goal.r * 1.8, life: 1, color: o.color })
           for (let i = 0; i < 26; i++) {
@@ -260,7 +270,16 @@ export default function Kinetic() {
       }
       ctx.globalAlpha = 1
 
+      if (settings.cameraFeed) {
+        drawCameraBackdrop(ctx, videoRef.current, W, H, {
+          mirror: settings.mirror, alpha: 0.16,
+          grade: 'grayscale(0.9) brightness(0.45) contrast(1.2)',
+        })
+      }
+
+      const bctx = settings.bloom ? g.bloom.layer(W, H) : null
       drawGoal(ctx, goal, now)
+      if (bctx) drawGoal(bctx, goal, now)
 
       for (const s of g.shocks) {
         ctx.save()
@@ -273,8 +292,10 @@ export default function Kinetic() {
         ctx.restore()
       }
 
-      for (const o of g.orbs) drawOrb(ctx, o, now)
-      for (const h of hands) drawHand(ctx, h, W, H, now)
+      for (const o of g.orbs) { drawOrb(ctx, o, now); if (bctx) drawOrb(bctx, o, now) }
+      for (const h of hands) { drawHand(ctx, h, W, H, now); if (bctx) drawHand(bctx, h, W, H, now) }
+      if (bctx) g.bloom.composite(ctx, W, H, { blur: 13, alpha: 0.6 })
+      drawVignette(ctx, W, H, 0.45)
 
       ctx.save()
       for (const b of g.bursts) {
@@ -440,66 +461,44 @@ export default function Kinetic() {
   }, [status])
 
   const loading = status === 'loading-model' || status === 'starting-camera'
+  const ACCENT = '#00E5B0'
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] w-full overflow-hidden">
       <video ref={videoRef} className="hidden" playsInline muted />
       <canvas ref={canvasRef} className="block h-full w-full" />
 
-      {status === 'error' && (
-        <Overlay><h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p></Overlay>
-      )}
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay><div className="calibrate mb-5" />
-          <p className="text-muted">{status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'}</p></Overlay>
+        <Loading accent={ACCENT} label={status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'} />
       )}
 
       {status === 'ready' && ui.phase === 'menu' && (
-        <Overlay>
-          <p className="text-mint mb-2">Move things without touching them</p>
-          <h1 className="font-display text-4xl md:text-6xl font-700 mb-5 text-center">Kinetic</h1>
-          <div className="grid gap-3 mb-7 max-w-md w-full text-sm">
-            <Row icon="✋" title="Open palm" body="A force field pushes every orb away from you. Spread your fingers wider for more power." />
-            <Row icon="✊" title="Close your fist" body="Snatch the nearest orb out of the air. It follows your hand." />
-            <Row icon="👐" title="Open again" body="Release. The orb flies off with whatever speed your hand was moving." />
+        <Screen accent={ACCENT}>
+          <Title kicker="Move things without touching them" accent={ACCENT}>Kinetic</Title>
+          <div className="grid gap-2.5 mb-7 max-w-md w-full mt-1">
+            <HowTo glyph="openPalm" title="Open palm" body="A force field pushes every orb away from you. Spread your fingers wider for more power." delay={80} />
+            <HowTo glyph="fist" title="Close your fist" body="Snatch the nearest orb out of the air. It follows your hand." delay={160} />
+            <HowTo glyph="wave" title="Open again to throw" body="Release, and the orb flies off with whatever speed your hand was moving." delay={240} />
           </div>
-          <p className="text-white/70 mb-6 text-center max-w-md">
-            Land orbs in the ring on the right. The faster they're travelling when they arrive, the
-            more they're worth. Up to four hands at once, so bring a friend.
+          <p className="text-white/70 mb-7 text-center max-w-md">
+            Land orbs in the ring on the right. The faster they arrive, the more they score.
+            Up to four hands at once, so bring a friend.
           </p>
-          <button onClick={start} className="btn-primary">Enter the arena</button>
-        </Overlay>
+          <Button accent={ACCENT} onClick={start}>Enter the arena</Button>
+        </Screen>
       )}
 
       {ui.phase === 'over' && (
-        <Overlay>
-          <p className="text-muted mb-1">Time</p>
-          <div className="font-display text-6xl font-700 text-mint mb-2">{ui.score}</div>
-          <p className="text-muted mb-7">{ui.banked} orbs banked</p>
-          <button onClick={start} className="btn-primary">Go again</button>
-        </Overlay>
+        <Screen accent={ACCENT}>
+          <p className="text-muted mb-2 tracking-[0.2em] uppercase text-xs">Time</p>
+          <div className="font-display text-7xl font-700 text-mint mb-2 animate-pop">
+            <Odometer value={ui.score} />
+          </div>
+          <p className="text-muted mb-8">{ui.banked} orbs banked</p>
+          <Button accent={ACCENT} onClick={start}>Go again</Button>
+        </Screen>
       )}
-    </div>
-  )
-}
-
-function Row({ icon, title, body }) {
-  return (
-    <div className="flex gap-3 rounded-xl bg-white/5 px-4 py-3">
-      <span className="text-xl leading-none pt-0.5" aria-hidden="true">{icon}</span>
-      <span>
-        <span className="block font-medium">{title}</span>
-        <span className="block text-muted text-xs mt-0.5">{body}</span>
-      </span>
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }

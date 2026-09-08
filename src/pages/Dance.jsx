@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useVision } from '../lib/useVision.js'
 import { loadSettings, addSession } from '../lib/storage.js'
-import { POSES, POSE_CONNECTIONS, ROUTINES, scorePose, boneScore } from '../lib/poses.js'
+import { POSES, ROUTINES, scorePose, boneScore } from '../lib/poses.js'
 import { createTracker, createRoster } from '../lib/tracking.js'
 import { useCanvasSize, logicalSize, scoreColor } from '../lib/canvas.js'
+import { createBloom, drawCameraBackdrop, drawVignette, drawFrameGuide, drawColorGrade } from '../lib/render.js'
+import { drawCharacter, withAlpha } from '../lib/characters.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { Screen, Title, Button, Choice, Results, Loading, ErrorScreen, Stagger, Odometer } from '../components/ui.jsx'
 
 const COLORS = ['#00E5B0', '#FF4D8D', '#FFB000', '#00D4FF']
 const NAMES = ['Player 1', 'Player 2', 'Player 3', 'Player 4']
@@ -36,6 +40,7 @@ export default function Dance() {
   const g = useRef({
     phase: 'menu',
     tracker: createTracker({ maxDist: 0.3, maxAge: 900 }),
+    bloom: createBloom(0.5),
     roster: null,
     players: [],
     step: -1,
@@ -45,6 +50,7 @@ export default function Dance() {
     live: [],
     popups: [],
     beat: 0,
+    beeped: -1,
     lastTime: 0,
     logged: false,
   }).current
@@ -123,12 +129,18 @@ export default function Dance() {
           g.roster.lock(tracks)
           g.phase = 'countdown'
           g.countStart = now
+          g.beeped = -1
+          sfx.whoosh()
         }
       } else g.readyAt = 0
     }
 
     function runCountdown(now) {
+      const n = Math.ceil((3200 - (now - g.countStart)) / 1000)
+      if (n !== g.beeped && n > 0) { g.beeped = n; sfx.beep(3 - n) }
       if (now - g.countStart > 3200) {
+        sfx.go()
+        playMusic('dance')
         g.phase = 'dancing'
         g.step = 0
         g.stepEndsAt = now + ROUTINES[cfg.current.routine].beatMs
@@ -147,10 +159,19 @@ export default function Dance() {
         p.best = Math.max(p.best, p.combo)
         p.grades.push(gr.label)
         g.popups.push({ i, label: gr.label, color: gr.color, life: 1 })
+        if (i === 0) {
+          if (gr.label === 'PERFECT') sfx.perfect()
+          else if (gr.label === 'GREAT') sfx.great()
+          else if (gr.label === 'GOOD') sfx.good()
+          else sfx.miss()
+          if (p.combo > 1 && gr.points > 0) sfx.combo(p.combo)
+        }
       }
       g.step += 1
       if (g.step >= routine.steps.length) {
         g.phase = 'over'
+        stopMusic()
+        sfx.win()
         if (!g.logged) {
           g.logged = true
           const best = [...g.players].sort((a, b) => b.score - a.score)[0]
@@ -174,15 +195,45 @@ export default function Dance() {
       bg.addColorStop(1, '#0A0A18')
       ctx.fillStyle = bg
       ctx.fillRect(0, 0, W, H)
+
+      // The dancers themselves, behind everything.
+      if (settings.cameraFeed) {
+        drawCameraBackdrop(ctx, videoRef.current, W, H, {
+          mirror: settings.mirror,
+          alpha: 0.34,
+          grade: 'grayscale(0.7) brightness(0.5) contrast(1.2)',
+        })
+        drawColorGrade(ctx, W, H, '#FF4D8D', 0.10)
+      }
       drawFloor(ctx, W, H, now)
 
-      if (target) drawTarget(ctx, W, H, target, now)
+      // Everything that glows goes into the bloom pass, then gets added back
+      // once — far cheaper and prettier than blurring each shape separately.
+      const useBloom = settings.bloom
+      const bctx = useBloom ? g.bloom.layer(W, H) : null
+
+      // With bloom on, the visible pass skips per-shape shadowBlur entirely and
+      // lets the blurred layer supply the glow. Cheaper and softer.
+      const mainGlow = useBloom ? 0 : null
+      if (target) {
+        drawTarget(ctx, W, H, target, now, mainGlow ?? 26)
+        if (bctx) drawTarget(bctx, W, H, target, now, 0)
+      }
       for (let i = 0; i < g.live.length; i++) {
         const l = g.live[i]
-        if (l) drawPerson(ctx, W, H, l, COLORS[i])
+        if (!l) continue
+        drawPerson(ctx, W, H, l, COLORS[i], mainGlow ?? 16)
+        if (bctx) drawPerson(bctx, W, H, l, COLORS[i], 0)
       }
+      if (bctx) g.bloom.composite(ctx, W, H, { blur: 10, alpha: 0.55 })
+
+      drawVignette(ctx, W, H, 0.5)
       if (g.phase === 'dancing') drawBeat(ctx, W, H)
       drawPopups(ctx, W, H, dt)
+
+      const anyoneSeen = g.live.some(Boolean)
+      drawFrameGuide(ctx, W, H, anyoneSeen || g.phase !== 'dancing', Math.sin(now * 0.006) * 0.5 + 0.5)
+
       if (g.phase === 'claim') drawClaim(ctx, W, H, tracks, now)
       if (g.phase === 'countdown') drawCountdown(ctx, W, H, now)
     }
@@ -219,62 +270,77 @@ export default function Dance() {
       ctx.restore()
     }
 
-    function drawTarget(ctx, W, H, target, now) {
-      const h = H * 0.5
-      const box = { x: W * 0.5 - h / 2, y: H * 0.10, w: h, h }
-      const pt = (i) => {
-        const p = target.points[i]
+    function drawTarget(ctx, W, H, target, now, glow = 26) {
+      const h = H * 0.52
+      const box = { x: W * 0.5 - h / 2, y: H * 0.09, w: h, h }
+      const pts = {}
+      for (const k of Object.keys(target.points)) {
+        const p = target.points[k]
         const x = settings.mirror ? 1 - p.x : p.x
-        return { x: box.x + x * box.w, y: box.y + p.y * box.h }
+        pts[k] = { x: box.x + x * box.w, y: box.y + p.y * box.h }
       }
+      // Projector cone from above sells the hologram.
       ctx.save()
-      ctx.globalAlpha = 0.4 + (1 - g.beat) * 0.25
-      ctx.strokeStyle = '#FFFFFF'
-      ctx.lineWidth = 14
-      ctx.lineCap = 'round'
-      ctx.lineJoin = 'round'
-      ctx.shadowColor = '#B06BFF'
-      ctx.shadowBlur = 34
-      for (const [a, b] of POSE_CONNECTIONS) {
-        const u = pt(a), v = pt(b)
-        ctx.beginPath()
-        ctx.moveTo(u.x, u.y)
-        ctx.lineTo(v.x, v.y)
-        ctx.stroke()
-      }
-      const head = pt(0)
-      const gap = Math.hypot(pt(11).x - pt(12).x, pt(11).y - pt(12).y)
+      const cone = ctx.createLinearGradient(W / 2, 0, W / 2, box.y + box.h)
+      cone.addColorStop(0, 'rgba(176,107,255,0.16)')
+      cone.addColorStop(1, 'rgba(176,107,255,0)')
+      ctx.fillStyle = cone
       ctx.beginPath()
-      ctx.arc(head.x, head.y, Math.max(13, gap * 0.42), 0, Math.PI * 2)
+      ctx.moveTo(W / 2 - 30, 0)
+      ctx.lineTo(W / 2 - box.w * 0.44, box.y + box.h)
+      ctx.lineTo(W / 2 + box.w * 0.44, box.y + box.h)
+      ctx.lineTo(W / 2 + 30, 0)
+      ctx.closePath()
+      ctx.fill()
+      // Platform the figure stands on, pulsing with the beat.
+      const beatPulse = 1 - Math.min(1, g.beat)
+      ctx.strokeStyle = withAlpha('#B06BFF', 0.35 + beatPulse * 0.4)
+      ctx.lineWidth = 2 + beatPulse * 3
+      ctx.beginPath()
+      ctx.ellipse(W / 2, box.y + box.h + 6, box.w * 0.32 * (1 + beatPulse * 0.06), box.w * 0.06, 0, 0, Math.PI * 2)
       ctx.stroke()
       ctx.restore()
+
+      drawCharacter(ctx, pts, {
+        color: '#B06BFF',
+        accent: '#EBDBFF',
+        alpha: 0.55 + (1 - g.beat) * 0.3,
+        hologram: true,
+        glow,
+      })
     }
 
-    function drawPerson(ctx, W, H, l, color) {
+    function drawPerson(ctx, W, H, l, color, glow = 16) {
       const lm = l.lm
-      const pt = (i) => ({
-        x: (settings.mirror ? 1 - lm[i].x : lm[i].x) * W,
-        y: lm[i].y * H,
-      })
-      ctx.save()
-      ctx.lineCap = 'round'
-      ctx.lineJoin = 'round'
-      ctx.lineWidth = 6
-      for (const [a, b] of POSE_CONNECTIONS) {
-        const va = lm[a], vb = lm[b]
-        if (!va || !vb || (va.visibility ?? 1) < 0.4 || (vb.visibility ?? 1) < 0.4) continue
-        const s = l.result ? boneScore(l.result.bones, a, b) : null
-        const col = s == null ? color : scoreColor(s)
-        const u = pt(a), v = pt(b)
-        ctx.strokeStyle = col
-        ctx.shadowColor = col
-        ctx.shadowBlur = 12
-        ctx.beginPath()
-        ctx.moveTo(u.x, u.y)
-        ctx.lineTo(v.x, v.y)
-        ctx.stroke()
+      const pts = {}
+      for (const i of [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]) {
+        if (!lm[i] || (lm[i].visibility ?? 1) < 0.4) continue
+        pts[i] = { x: (settings.mirror ? 1 - lm[i].x : lm[i].x) * W, y: lm[i].y * H }
       }
-      ctx.restore()
+      // Ground shadow anchors the character instead of leaving it floating.
+      const feet = [pts[27], pts[28]].filter(Boolean)
+      if (feet.length) {
+        const fx = feet.reduce((a, p) => a + p.x, 0) / feet.length
+        const fy = Math.max(...feet.map((p) => p.y))
+        ctx.save()
+        ctx.globalAlpha = 0.3
+        ctx.fillStyle = '#000'
+        ctx.beginPath()
+        ctx.ellipse(fx, fy + 8, 46, 10, 0, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.restore()
+      }
+      drawCharacter(ctx, pts, {
+        color,
+        accent: '#FFFFFF',
+        glow,
+        limbColor: l.result
+          ? (a, b) => {
+              const sc = boneScore(l.result.bones, a, b)
+              return sc == null ? null : scoreColor(sc)
+            }
+          : null,
+      })
     }
 
     function drawBeat(ctx, W, H) {
@@ -368,6 +434,7 @@ export default function Dance() {
 
   const loading = status === 'loading-model' || status === 'starting-camera'
   const ranked = [...ui.players].sort((a, b) => b.score - a.score)
+  const ACCENT = '#FF4D8D'
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] w-full overflow-hidden">
@@ -376,109 +443,87 @@ export default function Dance() {
 
       {ui.phase === 'dancing' && (
         <>
-          <div className="pointer-events-none absolute left-6 top-5">
-            <div className="text-xs text-white/50">Move {ui.step + 1} of {ui.total}</div>
-            <div className="font-display text-3xl font-700">{ui.poseName}</div>
-            <div className="text-white/60 text-sm max-w-[15rem]">{ui.hint}</div>
+          <div className="pointer-events-none absolute left-6 top-5 animate-riseIn" key={ui.poseName}>
+            <div className="text-[11px] uppercase tracking-[0.2em] text-white/45">
+              Move {ui.step + 1} of {ui.total}
+            </div>
+            <div className="font-display text-3xl md:text-4xl font-700 mt-0.5">{ui.poseName}</div>
+            <div className="text-white/60 text-sm max-w-[15rem] mt-1">{ui.hint}</div>
           </div>
-          <div className="pointer-events-none absolute right-6 top-5 flex flex-col gap-1.5 items-end">
+          <div className="pointer-events-none absolute right-6 top-5 flex flex-col gap-2 items-end">
             {ui.players.map((p, i) => (
-              <div key={i} className="flex items-center gap-3 rounded-lg bg-ink/50 px-3 py-1.5 backdrop-blur">
+              <div
+                key={i}
+                className="flex items-center gap-3 rounded-xl border px-3.5 py-2 backdrop-blur-md"
+                style={{ background: p.color + '14', borderColor: p.color + '44' }}
+              >
                 <span className="text-xs" style={{ color: p.color }}>{p.name}</span>
-                <span className="font-display text-lg">{p.score}</span>
-                {p.combo > 1 && <span className="text-xs text-mint">×{p.combo}</span>}
+                <Odometer value={p.score} className="font-display text-xl" />
+                {p.combo > 1 && (
+                  <span className="text-xs font-medium text-mint animate-pop" key={p.combo}>×{p.combo}</span>
+                )}
               </div>
             ))}
           </div>
         </>
       )}
 
-      {status === 'error' && (
-        <Overlay><h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p></Overlay>
-      )}
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay><div className="calibrate mb-5" />
-          <p className="text-muted">{status === 'loading-model' ? 'Loading body model…' : 'Waking up the camera…'}</p></Overlay>
+        <Loading
+          accent={ACCENT}
+          label={status === 'loading-model' ? 'Loading body model…' : 'Waking up the camera…'}
+        />
       )}
 
       {status === 'ready' && ui.phase === 'menu' && (
-        <Overlay>
-          <p className="text-violet mb-2">Follow the dancer. Hit every beat.</p>
-          <h1 className="font-display text-4xl md:text-6xl font-700 mb-5 text-center">Dance Floor</h1>
-          <p className="text-white/70 mb-7 max-w-md text-center">
+        <Screen accent={ACCENT}>
+          <Title kicker="Follow the dancer" accent={ACCENT}>Dance Floor</Title>
+          <p className="text-white/70 mb-7 max-w-md text-center animate-riseIn" style={{ animationDelay: '90ms', animationFillMode: 'backwards' }}>
             A figure moves through a routine. Match each shape before the bar runs out — your limbs
             light up green as they line up. Chain hits for a combo multiplier.
           </p>
-          <div className="w-full max-w-sm space-y-4">
-            <Choice label="Routine" options={ROUTINES.map((r, i) => ({ v: i, l: `${r.name} · ${r.level}` }))}
-              value={cfg.current.routine} onChange={(v) => { cfg.current = { ...cfg.current, routine: v }; setUi((u) => ({ ...u })) }} />
-            <Choice label="Dancers" options={[1, 2, 3, 4].map((n) => ({ v: n, l: n === 1 ? 'Solo' : n === 2 ? '1 v 1' : `${n} players` }))}
-              value={cfg.current.count} onChange={(v) => { cfg.current = { ...cfg.current, count: v }; setUi((u) => ({ ...u })) }} />
-          </div>
-          <button onClick={() => begin(cfg.current.count, cfg.current.routine)} className="btn-primary mt-7">
+          <Stagger className="w-full max-w-sm space-y-5 mb-7" gap={110}>
+            <Choice
+              label="Routine"
+              accent={ACCENT}
+              options={ROUTINES.map((r, i) => ({ v: i, l: `${r.name} · ${r.level}` }))}
+              value={cfg.current.routine}
+              onChange={(v) => { cfg.current = { ...cfg.current, routine: v }; setUi((u) => ({ ...u })) }}
+            />
+            <Choice
+              label="Dancers"
+              accent={ACCENT}
+              options={[1, 2, 3, 4].map((n) => ({ v: n, l: n === 1 ? 'Solo' : n === 2 ? '1 v 1' : `${n} players` }))}
+              value={cfg.current.count}
+              onChange={(v) => { cfg.current = { ...cfg.current, count: v }; setUi((u) => ({ ...u })) }}
+            />
+          </Stagger>
+          <Button accent={ACCENT} onClick={() => begin(cfg.current.count, cfg.current.routine)}>
             Start the music
-          </button>
-          <p className="text-muted text-xs mt-4">Stand back so everyone's legs are in frame.</p>
-        </Overlay>
+          </Button>
+          <p className="text-muted text-xs mt-5">Stand back so everyone's legs are in frame.</p>
+        </Screen>
       )}
 
       {ui.phase === 'over' && (
-        <Overlay>
-          <p className="text-muted mb-1">Routine complete</p>
-          <div className="font-display text-4xl font-700 mb-6 text-center">
+        <Screen accent={ACCENT}>
+          <p className="text-muted mb-2 tracking-[0.2em] uppercase text-xs">Routine complete</p>
+          <div className="font-display text-4xl md:text-5xl font-700 mb-7 text-center animate-pop">
             {ranked.length > 1 ? `${ranked[0].name} wins` : 'Nice moves'}
           </div>
-          <ul className="w-full max-w-sm space-y-1.5 mb-7">
-            {ranked.map((p, i) => (
-              <li key={i} className="flex items-center justify-between rounded-lg bg-white/5 px-4 py-2.5">
-                <span className="flex items-center gap-3">
-                  <span className="text-muted text-sm w-4">{i + 1}</span>
-                  <span style={{ color: p.color }}>{p.name}</span>
-                </span>
-                <span className="flex items-center gap-4 text-sm">
-                  <span className="text-muted">best ×{p.best}</span>
-                  <span className="font-display text-xl text-fg">{p.score}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-          <div className="flex gap-3">
-            <button onClick={() => begin(cfg.current.count, cfg.current.routine)} className="btn-primary">Dance again</button>
-            <button onClick={() => { g.phase = 'menu'; setUi((u) => ({ ...u, phase: 'menu' })) }} className="btn-ghost">Change routine</button>
+          <Results
+            accent={ACCENT}
+            rows={ranked.map((p) => ({ name: p.name, color: p.color, value: p.score, note: `best ×${p.best}` }))}
+          />
+          <div className="flex gap-3 mt-8">
+            <Button accent={ACCENT} onClick={() => begin(cfg.current.count, cfg.current.routine)}>Dance again</Button>
+            <Button variant="ghost" onClick={() => { g.phase = 'menu'; setUi((u) => ({ ...u, phase: 'menu' })) }}>
+              Change routine
+            </Button>
           </div>
-        </Overlay>
+        </Screen>
       )}
-    </div>
-  )
-}
-
-function Choice({ label, options, value, onChange }) {
-  return (
-    <div>
-      <div className="text-xs text-muted mb-1.5">{label}</div>
-      <div className="flex flex-wrap gap-2">
-        {options.map((o) => (
-          <button
-            key={o.v}
-            onClick={() => onChange(o.v)}
-            className={
-              'rounded-lg border px-3 py-1.5 text-sm transition-colors ' +
-              (value === o.v ? 'border-mint text-mint bg-mint/10' : 'border-line text-muted hover:text-fg')
-            }
-          >
-            {o.l}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }

@@ -4,6 +4,8 @@ import { loadSettings } from '../lib/storage.js'
 import { HAND_CONNECTIONS, isPointing, palmCenter, handSpan } from '../lib/gestures.js'
 import { createTracker } from '../lib/tracking.js'
 import { useCanvasSize, logicalSize, roundRect } from '../lib/canvas.js'
+import { sfx, playMusic } from '../lib/audio.js'
+import { Loading, ErrorScreen } from '../components/ui.jsx'
 
 const INKS = [
   '#00E5B0', '#7C5CFF', '#FF7A45', '#FFB000',
@@ -45,6 +47,7 @@ export default function Paint() {
     const ink = inkRef.current
     if (ink) ink.getContext('2d').clearRect(0, 0, ink.width, ink.height)
     g.clearFlash = 1
+    sfx.clear()
   }
 
   function download() {
@@ -64,6 +67,7 @@ export default function Paint() {
   }
 
   useEffect(() => { g.paper = paper }, [paper, g])
+  useEffect(() => { if (status === 'ready') playMusic('chill') }, [status])
 
   useEffect(() => {
     let raf
@@ -132,6 +136,7 @@ export default function Paint() {
           pen.hoverKey = null
         }
 
+        if (drawing && !pen.last && !btn) sfx.penDown()
         if (drawing && !btn) {
           // Stroke width tracks how close the hand is, so leaning in draws bolder.
           const scale = Math.max(0.6, Math.min(1.8, handSpan(lm) / 0.12))
@@ -197,6 +202,7 @@ export default function Paint() {
     }
 
     function applyButton(b, pen) {
+      sfx.pick()
       if (b.kind === 'ink') pen.color = b.color
       else if (b.kind === 'size') pen.size = b.size
       else if (b.kind === 'paper') setPaper(b.index)
@@ -351,28 +357,10 @@ export default function Paint() {
         </div>
       )}
 
-      {status === 'error' && (
-        <Overlay>
-          <h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p>
-        </Overlay>
-      )}
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay>
-          <div className="calibrate mb-5" />
-          <p className="text-muted">
-            {status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'}
-          </p>
-        </Overlay>
+        <Loading accent="#FF7A45" label={status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'} />
       )}
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }

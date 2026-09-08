@@ -4,6 +4,10 @@ import { loadSettings, addSession } from '../lib/storage.js'
 import { palmCenter } from '../lib/gestures.js'
 import { createTracker, createRoster } from '../lib/tracking.js'
 import { useCanvasSize, logicalSize, roundRect } from '../lib/canvas.js'
+import { createBloom, drawVignette } from '../lib/render.js'
+import { drawShip as drawShipArt } from '../lib/characters.js'
+import { sfx, playMusic, stopMusic } from '../lib/audio.js'
+import { Screen, Title, Button, HowTo, Results, Loading, ErrorScreen } from '../components/ui.jsx'
 
 const COLORS = ['#FFB000', '#00D4FF', '#FF4D8D', '#B6FF3C']
 const NAMES = ['Player 1', 'Player 2', 'Player 3', 'Player 4']
@@ -26,6 +30,7 @@ export default function Rocket() {
   const g = useRef({
     phase: 'menu',
     tracker: createTracker({ maxDist: 0.28, maxAge: 600 }),
+    bloom: createBloom(0.5),
     roster: null,
     ships: [],
     walls: [],
@@ -70,6 +75,7 @@ export default function Rocket() {
     g.dist = 0
     g.spawnAt = 0
     g.phase = 'flying'
+    playMusic('space')
   }
 
   useEffect(() => {
@@ -113,6 +119,7 @@ export default function Rocket() {
         else if (now - g.readyAt > 1500) {
           g.roster.lock(tracks)
           g.readyAt = 0
+          sfx.go()
           launch()
         }
       } else {
@@ -161,6 +168,7 @@ export default function Rocket() {
           if (s.y < w.gapTop || s.y > w.gapBottom) {
             s.alive = false
             g.shake = 1
+            sfx.crash()
             burst(sx, s.y, s.color)
           }
         }
@@ -185,6 +193,8 @@ export default function Rocket() {
     function finish(alive, aliveTeams) {
       const { teams } = cfgRef.current
       g.phase = 'over'
+      stopMusic()
+      sfx.win()
       const km = (g.dist / 100).toFixed(0)
       let winner
       if (teams) {
@@ -239,8 +249,10 @@ export default function Rocket() {
       ctx.globalAlpha = 1
 
       if (g.phase === 'flying' || g.phase === 'over') {
-        for (const w of g.walls) drawWall(ctx, W, H, w)
-        for (const s of g.ships) drawShip(ctx, W, H, s, now)
+        const bctx = settings.bloom ? g.bloom.layer(W, H) : null
+        for (const w of g.walls) { drawWall(ctx, W, H, w); if (bctx) drawWall(bctx, W, H, w) }
+        for (const s of g.ships) { drawShip(ctx, W, H, s, now); if (bctx) drawShip(bctx, W, H, s, now) }
+        if (bctx) g.bloom.composite(ctx, W, H, { blur: 11, alpha: 0.55 })
         for (const p of g.sparks) {
           ctx.globalAlpha = Math.max(0, p.life)
           ctx.fillStyle = p.color
@@ -249,6 +261,7 @@ export default function Rocket() {
           ctx.fill()
         }
         ctx.globalAlpha = 1
+        drawVignette(ctx, W, H, 0.45)
         drawHud(ctx, W)
       }
 
@@ -278,41 +291,17 @@ export default function Rocket() {
       const x = 0.18 * W
       const y = s.y * H
       if (!s.alive) return
-
-      // Exhaust trail
       ctx.save()
       for (let i = s.trail.length - 1; i >= 0; i--) {
         const t = s.trail[i]
-        ctx.globalAlpha = (1 - i / s.trail.length) * 0.5
+        ctx.globalAlpha = (1 - i / s.trail.length) * 0.4
         ctx.fillStyle = s.color
         ctx.beginPath()
-        ctx.arc(x - i * 5, t.y * H, Math.max(1, 7 - i * 0.3), 0, Math.PI * 2)
+        ctx.arc(x - i * 6, t.y * H, Math.max(1, 6 - i * 0.28), 0, Math.PI * 2)
         ctx.fill()
       }
       ctx.restore()
-
-      ctx.save()
-      ctx.translate(x, y)
-      ctx.shadowColor = s.color
-      ctx.shadowBlur = 20
-      ctx.fillStyle = s.color
-      ctx.beginPath()
-      ctx.moveTo(20, 0)
-      ctx.lineTo(-10, -10)
-      ctx.lineTo(-5, 0)
-      ctx.lineTo(-10, 10)
-      ctx.closePath()
-      ctx.fill()
-      const flick = 8 + Math.sin(now * 0.05) * 4
-      ctx.globalAlpha = 0.8
-      ctx.fillStyle = '#FFD36E'
-      ctx.beginPath()
-      ctx.moveTo(-8, -4)
-      ctx.lineTo(-8 - flick, 0)
-      ctx.lineTo(-8, 4)
-      ctx.closePath()
-      ctx.fill()
-      ctx.restore()
+      drawShipArt(ctx, x, y, Math.min(1.5, H / 480), s.color, now, false)
     }
 
     function drawHud(ctx, W) {
@@ -393,64 +382,51 @@ export default function Rocket() {
   }, [status])
 
   const loading = status === 'loading-model' || status === 'starting-camera'
+  const ACCENT = '#00D4FF'
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] w-full overflow-hidden">
       <video ref={videoRef} className="hidden" playsInline muted />
       <canvas ref={canvasRef} className="block h-full w-full" />
 
-      {status === 'error' && (
-        <Overlay><h2 className="font-display text-2xl mb-2">Camera not available</h2>
-          <p className="text-muted max-w-sm text-center">{error}</p></Overlay>
-      )}
+      {status === 'error' && <ErrorScreen message={error} />}
       {loading && (
-        <Overlay><div className="calibrate mb-5" />
-          <p className="text-muted">{status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'}</p></Overlay>
+        <Loading accent={ACCENT} label={status === 'loading-model' ? 'Loading hand model…' : 'Waking up the camera…'} />
       )}
 
       {status === 'ready' && ui.phase === 'menu' && (
-        <Overlay>
-          <p className="text-p2 mb-2">Fly with your palm. Last one flying wins.</p>
-          <h1 className="font-display text-4xl md:text-6xl font-700 mb-6 text-center">Rocket Rush</h1>
-          <p className="text-white/70 mb-7 max-w-md text-center">
-            Raise your hand and move it up and down to fly. Thread the gaps in the gates — one
-            clip and you're out. The walls get faster and the gaps get tighter.
-          </p>
-          <div className="flex flex-wrap justify-center gap-3">
-            <button onClick={() => begin(2, false)} className="btn-primary">1 v 1</button>
-            <button onClick={() => begin(3, false)} className="btn-ghost">3 players</button>
-            <button onClick={() => begin(4, false)} className="btn-ghost">4 players</button>
-            <button onClick={() => begin(4, true)} className="btn-ghost">2 v 2 teams</button>
+        <Screen accent={ACCENT}>
+          <Title kicker="Fly with your palm · last one flying wins" accent={ACCENT}>Rocket Rush</Title>
+          <div className="grid gap-2.5 mb-7 max-w-md w-full mt-1">
+            <HowTo glyph="openPalm" title="Raise a hand" body="Everyone stands left to right. When all pilots are in, you launch." delay={80} />
+            <HowTo glyph="wave" title="Move up and down" body="Your palm height flies the rocket. Thread the gap in every gate." delay={160} />
+            <HowTo glyph="fist" title="One clip and you're out" body="The gates speed up and the gaps narrow the further you get." delay={240} />
           </div>
-        </Overlay>
+          <div className="flex flex-wrap justify-center gap-3">
+            <Button accent={ACCENT} onClick={() => begin(2, false)}>1 v 1</Button>
+            <Button variant="ghost" onClick={() => begin(3, false)}>3 players</Button>
+            <Button variant="ghost" onClick={() => begin(4, false)}>4 players</Button>
+            <Button variant="ghost" onClick={() => begin(4, true)}>2 v 2 teams</Button>
+          </div>
+        </Screen>
       )}
 
       {ui.phase === 'over' && (
-        <Overlay>
-          <p className="text-muted mb-1">Flight over</p>
-          <div className="font-display text-4xl md:text-5xl font-700 mb-6 text-center">{ui.winner} wins</div>
-          <ul className="w-full max-w-xs space-y-1.5 mb-7">
-            {ui.standing.map((s, i) => (
-              <li key={i} className="flex items-center justify-between rounded-lg bg-white/5 px-4 py-2 text-sm">
-                <span style={{ color: s.color }}>{s.name}</span>
-                <span className="text-muted">{s.alive ? 'survived' : 'wrecked'}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="flex gap-3">
-            <button onClick={() => begin(cfgRef.current.count, cfgRef.current.teams)} className="btn-primary">Fly again</button>
-            <button onClick={() => { g.phase = 'menu'; setUi({ phase: 'menu', claimed: 0, standing: [], winner: '' }) }} className="btn-ghost">Change mode</button>
+        <Screen accent={ACCENT}>
+          <p className="text-muted mb-2 tracking-[0.2em] uppercase text-xs">Flight over</p>
+          <div className="font-display text-4xl md:text-5xl font-700 mb-7 text-center animate-pop">{ui.winner} wins</div>
+          <Results
+            accent={ACCENT}
+            rows={ui.standing.map((s) => ({ name: s.name, color: s.color, note: s.alive ? 'survived' : 'wrecked' }))}
+          />
+          <div className="flex gap-3 mt-8">
+            <Button accent={ACCENT} onClick={() => begin(cfgRef.current.count, cfgRef.current.teams)}>Fly again</Button>
+            <Button variant="ghost" onClick={() => { g.phase = 'menu'; setUi({ phase: 'menu', claimed: 0, standing: [], winner: '' }) }}>
+              Change mode
+            </Button>
           </div>
-        </Overlay>
+        </Screen>
       )}
-    </div>
-  )
-}
-
-function Overlay({ children }) {
-  return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-ink/70 backdrop-blur-sm px-6">
-      {children}
     </div>
   )
 }
